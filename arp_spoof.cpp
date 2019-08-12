@@ -84,6 +84,19 @@ void get_mymac(char* mymac, char* iface){
 	for(int i=0; i<6; i++) mymac[i] = mac[i];
 }
 
+bool check_arp_reply(const u_char* packet, uint8_t* mymac){
+    struct packet buf;
+    int type;
+
+    memcpy(&buf, packet, 42);
+    type = (buf.eth.type[0]<<8 | buf.eth.type[1]);
+    if(type == 0x0806) {
+	if(!memcmp(buf.eth.dst_mac, mymac, 6)) return true;
+    }
+    return false;
+}
+
+
 bool check_arp(const u_char* packet, uint8_t* mymac){
     struct ethernet_header eth;
     int type;
@@ -91,7 +104,7 @@ bool check_arp(const u_char* packet, uint8_t* mymac){
     memcpy(&eth, packet, 14);
     type = (eth.type[0]<<8 | eth.type[1]);
     if(type == 0x0806) {
-	if(!memcmp(eth.dst_mac, mymac, 6)) return true;
+	if(!memcmp(eth.dst_mac, mymac, 6) || !memcmp(eth.dst_mac, "\xff\xff\xff\xff\xff\xff", 6)) return true;
     }
     return false;
 }
@@ -119,12 +132,13 @@ void get_mac(pcap_t* handle, uint8_t* smac, uint8_t* tmac, uint8_t* tip){
     memcpy(buf.arp.sip, "\xde\xad\xbe\xef", 4);
     memcpy(buf.arp.tmac, "\x00\x00\x00\x00\x00\x00", 6);
     memcpy(buf.arp.tip, tip, 4);
-      
-    if(!pcap_sendpacket(handle, (const u_char*)&buf, 60)) 
-        printf("send packet....\n");
-    else
-        fprintf(stderr, "send packet error!\n");
-        
+ 
+    for (int i=0; i<5; i++){     
+        if(!pcap_sendpacket(handle, (const u_char*)&buf, 60)) 
+            printf("send packet....\n");
+        else
+            fprintf(stderr, "send packet error!\n");
+    }
     while (true) {
         struct pcap_pkthdr* header;
         const u_char* packet;
@@ -132,10 +146,11 @@ void get_mac(pcap_t* handle, uint8_t* smac, uint8_t* tmac, uint8_t* tip){
         if (res == 0) continue;
         if (res == -1 || res == -2) break;
         printf("%u bytes captured\n", header->caplen);
-        if(check_arp(packet, smac)){
+        if(check_arp_reply(packet, smac)){
             extract_mac(packet, tmac);
             break;
         }
+        pcap_sendpacket(handle, (const u_char*)&buf, 60);
     }
 }
 
@@ -241,7 +256,7 @@ int main(int argc, char* argv[]){
         for (int i=0; i<session_num; i++){
             if(check_arp(packet, sessions[i].smac)){
                 send_arp_reply(handle, mymac, sessions[i].tip, sessions[i].smac, sessions[i].sip);
-	        continue;
+                continue;
             }
 	}
 
